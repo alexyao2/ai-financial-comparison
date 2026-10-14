@@ -2,6 +2,9 @@ from household import Finances, household, validate_finances
 
 def calculate_after_expenses(finances: Finances) -> int:
     validate_finances(finances)
+
+
+
     total_expenses = (
         finances["rent"] + finances["mortgage"]
         + finances["utilities"] + sum(finances["living_expenses"].values()) # type: ignore
