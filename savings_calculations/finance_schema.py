@@ -15,6 +15,9 @@ class Insurance(TypedDict):
     auto: int
     home: int
 
+class Minimums(TypedDict):
+    living_expenses: LivingExpenses
+
 class Finances(TypedDict):
     total_income: int
     rent: int
@@ -23,4 +26,5 @@ class Finances(TypedDict):
     living_expenses: LivingExpenses
     subscriptions: Subscriptions
     insurance: Insurance
+    minimums: Minimums
 
