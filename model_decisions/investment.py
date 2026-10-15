@@ -21,6 +21,9 @@ def validate_investment_config(config: InvestmentConfig) -> None:
     if not config["allowed_asset_types"]:
         raise ValueError("Allowed asset types list cannot be empty.")
 
+    if type(config["transaction_costs"]) is not float or config["transaction_costs"] < 0:
+        raise ValueError("Transaction costs must be a non-negative float.")
+
     # validate that the start date is before the end date
     if config["investment_start_date"] >= config["investment_end_date"]:
         raise ValueError("Investment start date must be before the investment end date.")
@@ -51,6 +54,7 @@ investment_config: InvestmentConfig = {
     "monthly_contribution": 500,
     "allowed_asset_types": ["individual_stock", "broad_equity_etf", "treasury_bond_etf", "cash", "cryptocurrency"],
     "rebalance_frequency": "quarterly",
+    "transaction_costs": 0.01,  # 1% transaction costs
 }
 
 if __name__ == "__main__":

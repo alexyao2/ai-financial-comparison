@@ -10,4 +10,5 @@ class InvestmentConfig(TypedDict):
     monthly_contribution: int
     allowed_asset_types: list[AssetType]
     rebalance_frequency: Literal["monthly", "quarterly", "annually"]
+    transaction_costs: float
 
