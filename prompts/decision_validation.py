@@ -75,18 +75,6 @@ def validate_decision(
         abs_tol=0.000001,
     ):
         raise ValueError("Allocation weights must total 100.")
-
-    # Validate explanations.
-    for field in ("rationale", "risks"):
-        entries = response[field]
-        if not isinstance(entries, list) or not entries:
-            raise ValueError(f"{field} must be a non-empty list.")
-
-        for index, entry in enumerate(entries):
-            if not isinstance(entry, str) or not entry.strip():
-                raise ValueError(
-                    f"{field}[{index}] must be a non-empty string."
-                )
     
     #validate rationale & risks
     for field in ("rationale", "risks"):
@@ -111,7 +99,7 @@ def validate_decision(
         raise ValueError("decision_date must use exactly YYYY-MM-DD.")
     if expected_date is not None and decision_date != expected_date:
         raise ValueError("decision_date does not match the review date.")
-
+    
 
 if __name__ == "__main__":
     # Example usage
@@ -122,13 +110,14 @@ if __name__ == "__main__":
             {"category": "broad_equity_etf", "identifier": "SPY", "weight": 30},
             {"category": "treasury_bond_etf", "identifier": "TLT", "weight": 20}
         ],
-        "decision_date": "2024-06-01",
+        "decision_date": "2019-01-01",
         "rationale": ["Diversification across asset classes", "Long-term growth potential"],
         "risks": ["Market volatility", "Interest rate changes"]
     }
     '''
     parsed_response = json.loads(response_text)
-    validate_decision(parsed_response)
+    validate_decision(parsed_response, expected_date="2019-01-01")
+    print("Decision validation passed successfully.")
 
 
 

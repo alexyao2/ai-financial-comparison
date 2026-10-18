@@ -1,3 +1,4 @@
+import math
 from datetime import datetime
 from typing import get_args
 from model_decisions.investment_config import AssetType, InvestmentConfig
@@ -21,8 +22,10 @@ def validate_investment_config(config: InvestmentConfig) -> None:
     if not config["allowed_asset_types"]:
         raise ValueError("Allowed asset types list cannot be empty.")
 
-    if type(config["transaction_costs"]) is not float or config["transaction_costs"] < 0:
-        raise ValueError("Transaction costs must be a non-negative float.")
+    if type(config["transaction_costs"]) is not float or not math.isfinite(config["transaction_costs"]) < 0:
+        raise ValueError("Transaction costs must be a finite float.")
+    if not 0 <= config["transaction_costs"] <= 1:
+        raise ValueError("Transaction costs must be between 0 and 1.")
 
     # validate that the start date is before the end date
     if config["investment_start_date"] >= config["investment_end_date"]:
