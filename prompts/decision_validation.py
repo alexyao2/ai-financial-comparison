@@ -1,4 +1,8 @@
 import json
+import math
+from datetime import datetime
+from typing import get_args
+from model_decisions.investment_config import AssetType
 
 def validate_decision(
         response: object, 
@@ -10,56 +14,103 @@ def validate_decision(
         if field not in response:
             raise ValueError(f"Missing required field: {field}")
 
-    if not isinstance(response["allocations"], list):
-        raise ValueError("allocations must be a list.")
-    if not response["allocations"]:
+    #validate allocations
+    allocations = response["allocations"]
+    if not isinstance(allocations, list) or not allocations:
         raise ValueError("allocations must be a non-empty list.")
-    for index, allocation in enumerate(response["allocations"]):
+
+    seen_identifiers: set[str] = set()
+    weights: list[float] = []
+
+    for index, allocation in enumerate(allocations):
         if not isinstance(allocation, dict):
-            raise ValueError(f"Allocation at index {index} must be a dictionary.")
+            raise ValueError(f"Allocation {index} must be a dictionary.")
+
         for field in ("category", "identifier", "weight"):
             if field not in allocation:
-                raise ValueError(f"Missing required field '{field}' in allocation at index {index}.")
-        if not isinstance(allocation["category"], str):
-            raise ValueError(f"Allocation category at index {index} must be a string.")
-        if not isinstance(allocation["identifier"], str):
-            raise ValueError(f"Allocation identifier at index {index} must be a string.")
-        if type(allocation["weight"]) not in (int, float):
-            raise ValueError(f"Allocation weight at index {index} must be a number.")
-        if allocation["weight"] < 0 or allocation["weight"] > 100:
-            raise ValueError(f"Allocation weight at index {index} must be between 0 and 100.")
+                raise ValueError(f"Allocation {index} is missing {field}.")
 
-    
-    if not isinstance(response["rationale"], list):
-        raise ValueError("rationale must be a list.")
-    if response["rationale"] == []:
-        raise ValueError("rationale must be a non-empty list.")
-    for index, rationale in enumerate(response["rationale"]):
-        if not isinstance(rationale, str):
-            raise ValueError(f"Rationale at index {index} must be a string.")
-        if rationale == "":
-            raise ValueError(f"Rationale at index {index} must be a non-empty string.")
-        if rationale != rationale.strip():
-            raise ValueError(f"Rationale at index {index} must not have leading or trailing whitespace.")
-    
-    if not isinstance(response["risks"], list):
-        raise ValueError("risks must be a list.")
-    if response["risks"] == []:
-        raise ValueError("risks must be a non-empty list.")
-    for index, risk in enumerate(response["risks"]):
-        if not isinstance(risk, str):
-            raise ValueError(f"Risk at index {index} must be a string.")
-        if risk == "":
-            raise ValueError(f"Risk at index {index} must be a non-empty string.")
-        if risk != risk.strip():
-            raise ValueError(f"Risk at index {index} must not have leading or trailing whitespace.")
+        category = allocation["category"]
+        if not isinstance(category, str) or category not in get_args(AssetType):
+            raise ValueError(f"Allocation {index} has an invalid category.")
 
+        identifier = allocation["identifier"]
+        if not isinstance(identifier, str) or not identifier.strip():
+            raise ValueError(f"Allocation {index} needs an identifier.")
+
+        if identifier != identifier.strip().upper():
+            raise ValueError(
+                f"Allocation {index} identifier must be uppercase "
+                "without surrounding whitespace."
+            )
+
+        if category == "cash" and identifier != "USD":
+            raise ValueError("Cash must use identifier USD.")
+
+        if category != "cash" and identifier == "USD":
+            raise ValueError("Identifier USD is reserved for cash.")
+
+        if identifier in seen_identifiers:
+            raise ValueError(f"Duplicate holding: {identifier}")
+        seen_identifiers.add(identifier)
+
+        weight = allocation["weight"]
+        if type(weight) not in (int, float):
+            raise ValueError(f"Allocation {index} weight must be numeric.")
+
+        if not 0 <= weight <= 100:
+            raise ValueError(
+                f"Allocation {index} weight must be between 0 and 100."
+            )
+
+        if not math.isfinite(weight):
+            raise ValueError(f"Allocation {index} weight must be finite.")
+
+        weights.append(float(weight))
+
+    if not math.isclose(
+        math.fsum(weights),
+        100.0,
+        rel_tol=0,
+        abs_tol=0.000001,
+    ):
+        raise ValueError("Allocation weights must total 100.")
+
+    # Validate explanations.
+    for field in ("rationale", "risks"):
+        entries = response[field]
+        if not isinstance(entries, list) or not entries:
+            raise ValueError(f"{field} must be a non-empty list.")
+
+        for index, entry in enumerate(entries):
+            if not isinstance(entry, str) or not entry.strip():
+                raise ValueError(
+                    f"{field}[{index}] must be a non-empty string."
+                )
+    
+    #validate rationale & risks
+    for field in ("rationale", "risks"):
+        entries = response[field]
+        if not isinstance(entries, list) or not entries:
+            raise ValueError(f"{field} must be a non-empty list.")
+
+        for index, entry in enumerate(entries):
+            if not isinstance(entry, str) or not entry.strip():
+                raise ValueError(
+                    f"{field}[{index}] must be a non-empty string.")
+
+    # validate decision date
+    decision_date = response["decision_date"]
     if not isinstance(response["decision_date"], str):
         raise ValueError("decision_date must be a string.")
-    if response["decision_date"] == "":
-        raise ValueError("decision_date must be a non-empty string.")
-    if response["decision_date"] != response["decision_date"].strip():
-        raise ValueError("decision_date must not have leading or trailing whitespace.")
+    try:
+        parsed_date = datetime.strptime(decision_date, "%Y-%m-%d")
+    except ValueError:
+        raise ValueError("decision_date must be a valid YYYY-MM-DD date.")
+    if parsed_date.strftime("%Y-%m-%d") != decision_date:
+        raise ValueError("decision_date must use exactly YYYY-MM-DD.")
+    if expected_date is not None and decision_date != expected_date:
+        raise ValueError("decision_date does not match the review date.")
 
 
 if __name__ == "__main__":
