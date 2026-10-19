@@ -1,0 +1,13 @@
+{
+  "AAPL": "individual_stock",
+  "NVDA": "individual_stock",
+  "SPY": "broad_equity_etf",
+  "VOO": "broad_equity_etf",
+  "VTI": "broad_equity_etf",
+  "TLT": "treasury_bond_etf",
+  "IEF": "treasury_bond_etf",
+  "SHY": "treasury_bond_etf",
+  "BTC-USD": "cryptocurrency",
+  "ETH-USD": "cryptocurrency",
+  "USD": "cash"
+}

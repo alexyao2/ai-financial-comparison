@@ -1,0 +1,11 @@
+# Credentials and local environments
+.env
+.env.*
+!.env.example
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+# Generated data, responses, and shared API budget ledger
+runs/
+.cache/
