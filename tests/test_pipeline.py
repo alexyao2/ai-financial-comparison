@@ -1,4 +1,8 @@
 import json
+from io import BytesIO
+import sqlite3
+import urllib.error
+from contextlib import closing
 from pathlib import Path
 import tempfile
 import unittest
@@ -87,47 +91,85 @@ class SimulationTests(unittest.TestCase):
 
 
 class BudgetTests(unittest.TestCase):
+    def setUp(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.root = Path(folder.name)
+        self.budget = Budget(self.root / 'ledger.sqlite')
+        self.settings = {'provider': 'groq', 'model': 'test', 'key': 'fake-secret',
+                         'input': 1., 'output': 2.}
+        settings = patch('model_decisions.api.provider_settings', return_value=self.settings)
+        settings.start()
+        self.addCleanup(settings.stop)
+
+    def client(self):
+        return APIClient('groq', self.root)
+
+    def test_explicit_free_retry_preserves_failed_attempt(self):
+        b = self.budget
+        b.reserve('first', 0)
+        with self.assertRaises(RuntimeError):
+            b.reserve('first', 0)
+        retry = b.reserve('first', 0, retry_free=True)
+        self.assertNotEqual(retry, 'first')
+        b.settle(retry, 0)
+        with closing(sqlite3.connect(b.path)) as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM calls').fetchone()[0], 2)
+        b.reserve('paid', 1)
+        with self.assertRaises(RuntimeError):
+            b.reserve('paid', 0, retry_free=True)
+
+    def test_http_error_body_is_saved_with_key_redacted(self):
+        self.settings.update(input=0., output=0.)
+        error = urllib.error.HTTPError('https://example.test', 500, 'Internal Error', {},
+                                      BytesIO(b'backend failed fake-secret'))
+        with patch('urllib.request.urlopen', side_effect=error):
+            with self.assertRaisesRegex(RuntimeError, 'HTTP 500'):
+                self.client().decide('test', {})
+        saved = list((self.root / '.cache/errors').glob('*.json'))
+        self.assertEqual(len(saved), 1)
+        self.assertNotIn('fake-secret', saved[0].read_text())
+        self.assertEqual(json.loads(saved[0].read_text())['http_status'], 500)
+
     def test_rate_limit_can_be_retried_without_double_reservation(self):
-        with tempfile.TemporaryDirectory() as folder:
-            b = Budget(Path(folder)/'ledger.sqlite')
-            b.reserve('one', 4)
-            b.rate_limited('one')
-            self.assertEqual(b.committed(), 0)
-            b.reserve('one', 4)
-            self.assertEqual(b.committed(), 4)
+        b = self.budget
+        b.reserve('one', 4)
+        b.rate_limited('one')
+        self.assertEqual(b.committed(), 0)
+        b.reserve('one', 4)
+        self.assertEqual(b.committed(), 4)
 
     def test_shared_cap_and_uncertain_requests(self):
-        with tempfile.TemporaryDirectory() as folder:
-            path=Path(folder)/'ledger.sqlite'
-            b=Budget(path)
-            b.reserve('one',4)
-            with self.assertRaises(RuntimeError): Budget(path).reserve('two',2)
-            with self.assertRaises(RuntimeError): b.reserve('one',0)
-            b.settle('one',1)
-            b.reserve('two',2)
-            self.assertEqual(b.committed(),3)
+        b = self.budget
+        b.reserve('one', 4)
+        with self.assertRaises(RuntimeError):
+            Budget(b.path).reserve('two', 2)
+        with self.assertRaises(RuntimeError):
+            b.reserve('one', 0)
+        b.settle('one', 1)
+        b.reserve('two', 2)
+        self.assertEqual(b.committed(), 3)
 
     def test_api_cached_once_without_network(self):
-        decision=fixed_decision('2019-01-01',[('cash','USD',100)],'test')
-        raw={'model':'test','choices':[{'message':{'content':json.dumps(decision)}}],
-             'usage':{'prompt_tokens':100,'completion_tokens':50}}
-        from io import BytesIO
-        settings={'provider':'groq','model':'test','key':'fake','input':1.,'output':2.}
-        with tempfile.TemporaryDirectory() as folder, patch('model_decisions.api.provider_settings',return_value=settings), patch('urllib.request.urlopen',return_value=BytesIO(json.dumps(raw).encode())) as request:
-            c=APIClient('groq',folder)
-            self.assertEqual(c.decide('test',{}),decision)
-            self.assertEqual(c.decide('test',{}),decision)
-            self.assertEqual(request.call_count,1)
-            self.assertTrue(c.last_metadata['cache_hit'])
-            self.assertAlmostEqual(c.budget.committed(),.0002)
+        decision = fixed_decision('2019-01-01', [('cash', 'USD', 100)], 'test')
+        raw = {'model': 'test', 'choices': [{'message': {'content': json.dumps(decision)}}],
+               'usage': {'prompt_tokens': 100, 'completion_tokens': 50}}
+        with patch('urllib.request.urlopen', return_value=BytesIO(json.dumps(raw).encode())) as request:
+            client = self.client()
+            for _ in range(2):
+                self.assertEqual(client.decide('test', {}), decision)
+                self.assertEqual(request.call_count, 1)
+            self.assertTrue(client.last_metadata['cache_hit'])
+            self.assertAlmostEqual(client.budget.committed(), .0002)
 
     def test_failed_api_retains_reservation(self):
-        settings={'provider':'groq','model':'test','key':'fake','input':1.,'output':2.}
-        with tempfile.TemporaryDirectory() as folder, patch('model_decisions.api.provider_settings',return_value=settings), patch('urllib.request.urlopen',side_effect=TimeoutError):
-            c=APIClient('groq',folder)
-            with self.assertRaises(TimeoutError): c.decide('test',{})
-            self.assertGreater(c.budget.committed(),0)
-            with self.assertRaises(RuntimeError): c.decide('test',{})
+        with patch('urllib.request.urlopen', side_effect=TimeoutError):
+            client = self.client()
+            with self.assertRaises(TimeoutError):
+                client.decide('test', {})
+            self.assertGreater(client.budget.committed(), 0)
+            with self.assertRaises(RuntimeError):
+                client.decide('test', {})
 
 
 if __name__ == '__main__':

@@ -1,4 +1,4 @@
-"""Run an offline demo or an explicitly requested, budgeted API comparison."""
+"""Run an offline demo or live model comparison."""
 import argparse
 from copy import deepcopy
 from datetime import datetime
@@ -10,7 +10,7 @@ import time
 import pandas as pd
 
 from market_data.store import PriceStore, synthetic_prices
-from model_decisions.api import APIClient
+from model_decisions.api import APIClient, ENDPOINTS
 from model_decisions.investment import investment_config, validate_investment_config
 from prompts.decision_validation import validate_decision
 from savings_calculations.household import household, validate_finances
@@ -50,7 +50,6 @@ def choose_local(name, packet):
 
 
 def visible_events(events, cutoff):
-    # published_at must describe historical availability, including vintage.
     result = []
     for event in events:
         for field in ("published_at", "description", "source"):
@@ -68,16 +67,13 @@ def run_strategy(name, config, store, calendar, output, registry, events, system
     portfolio = Portfolio()
     records, history = [], []
     weights = {"USD": 1.0}
-    previous_period = previous_month = None
     last_date = None
-    decisions = 0
     start = pd.Timestamp(config["investment_start_date"])
     for date in calendar:
-        period = review_period(date, config["rebalance_frequency"])
-        review = period != previous_period
-        month = (date.year, date.month)
+        frequency = config["rebalance_frequency"]
+        review = last_date is None or review_period(date, frequency) != review_period(last_date, frequency)
         deposit = (config["initial_investment"] if last_date is None else 0)
-        if month != previous_month:
+        if last_date is None or (date.year, date.month) != (last_date.year, last_date.month):
             deposit += config["monthly_contribution"]
         if review:
             cutoff = last_date if last_date is not None else start - pd.Timedelta(days=1)
@@ -108,7 +104,7 @@ def run_strategy(name, config, store, calendar, output, registry, events, system
                 if category not in config["allowed_asset_types"]:
                     raise ValueError(f"Category {category} is not allowed in configuration")
                 if ticker not in registry:
-                    raise ValueError(f"Verify {ticker}'s category and add it to config/assets.json, then rerun; response is cached")
+                    raise ValueError(f"Verify {ticker} in config/assets.json, then rerun the cached response.")
                 if registry[ticker] != category:
                     raise ValueError(f"Category mismatch for {ticker}: expected {registry[ticker]}")
                 if ticker != "USD" and store.get(ticker).loc[:cutoff].empty:
@@ -116,34 +112,35 @@ def run_strategy(name, config, store, calendar, output, registry, events, system
             weights = weights_from(decision)
             write_json(folder / f"{date_text}.accepted.json", decision)
             history.append(decision)
-            decisions += 1
         tickers = set(portfolio.holdings) | {t for t,w in weights.items() if w > 0}
         prices = store.prices_on(date, tickers)
         records.append(portfolio.step(date, prices, deposit, weights,
                                       config["transaction_costs"], rebalance=review))
-        previous_period, previous_month, last_date = period, month, date
+        last_date = date
     frame = pd.DataFrame(records).set_index("Date")
     (output / name).mkdir(parents=True, exist_ok=True)
     frame.to_csv(output / name / "portfolio.csv")
     write_json(output / name / "final_holdings.json", portfolio.snapshot())
-    return frame, decisions
+    return frame, len(history)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--live", action="store_true", help="Enable real provider calls and historical downloads")
-    parser.add_argument("--providers", nargs="+", choices=["openai", "gemini", "groq"], default=["groq", "gemini"])
+    parser.add_argument("--providers", nargs="+", choices=list(ENDPOINTS), default=["groq", "gemini"])
     parser.add_argument("--start", help="YYYY-MM-DD; live default uses investment.py")
     parser.add_argument("--end", help="YYYY-MM-DD, inclusive")
     parser.add_argument("--output", type=Path, default=ROOT / "runs" / "demo")
     args = parser.parse_args()
     config = deepcopy(investment_config)
-    config["investment_start_date"] = datetime.fromisoformat(args.start or (str(config["investment_start_date"].date()) if args.live else "2019-01-01"))
-    config["investment_end_date"] = datetime.fromisoformat(args.end or (str(config["investment_end_date"].date()) if args.live else "2019-12-31"))
+    for boundary, demo_date in (("start", "2019-01-01"), ("end", "2019-12-31")):
+        field = f"investment_{boundary}_date"
+        default = str(config[field].date()) if args.live else demo_date
+        config[field] = datetime.fromisoformat(getattr(args, boundary) or default)
     validate_investment_config(config)
     validate_finances(household)
-    if set(("broad_equity_etf", "treasury_bond_etf", "cash")) - set(config["allowed_asset_types"]):
-        raise ValueError("Built-in comparison baselines require equity ETF, Treasury ETF, and cash categories")
+    if {"broad_equity_etf", "treasury_bond_etf", "cash"} - set(config["allowed_asset_types"]):
+        raise ValueError("Baselines require equity ETF, Treasury ETF, and cash categories.")
     registry = json.loads((ROOT / "config/assets.json").read_text())
     events = json.loads((ROOT / "config/events.json").read_text())
     if not isinstance(events, list):
@@ -181,11 +178,10 @@ def main():
                 "session_count": len(calendar),
                 "transaction_cost_rate": config["transaction_costs"],
                 "macro_context": "user supplied release-dated events" if events else "none; trailing market returns only"}
-    # Do not overwrite outputs from a different configuration.
     manifest_path = output / "manifest.json"
     comparable = json.loads(json.dumps(manifest, default=str))
     if manifest_path.exists() and json.loads(manifest_path.read_text()) != comparable:
-        raise ValueError("Output folder belongs to a different experiment. Choose a new --output directory")
+        raise ValueError("Output configuration differs; choose a new --output directory.")
     write_json(manifest_path, manifest)
     frames, statuses = {}, {}
     names = ["cash", "balanced"] + (list(clients) if args.live else ["mock"])
@@ -196,23 +192,22 @@ def main():
             frames[name] = frame
             statuses[name] = {"status": "complete", "valid_decisions": count}
         except Exception as error:
-            # Invalid or failed runs are not silently converted to cash or ranked.
             statuses[name] = {"status": "failed", "error_type": type(error).__name__, "error": str(error)}
             print(f"{name} failed: {type(error).__name__}: {error}", file=sys.stderr)
         decision_folder = output / name / "decisions"
-        statuses[name]["attempted_decisions"] = len(list(decision_folder.glob("*.request.json")))
-        statuses[name]["accepted_decisions"] = len(list(decision_folder.glob("*.accepted.json")))
+        for label, suffix in (("attempted", "request"), ("accepted", "accepted")):
+            statuses[name][f"{label}_decisions"] = sum(1 for _ in decision_folder.glob(f"*.{suffix}.json"))
         write_json(output / "status.json", statuses)
+    folder = output / "input_prices"
+    folder.mkdir(exist_ok=True)
     for ticker, series in store.series.items():
-        folder = output / "input_prices"
-        folder.mkdir(exist_ok=True)
         series.rename(ticker).to_csv(folder / f"{ticker}.csv", index_label="Date")
     write_json(output / "asset_registry.json", registry)
     write_report(output, frames, statuses, manifest["mode"])
     if clients:
         print(f"Shared API ledger committed: ${next(iter(clients.values())).budget.committed():.4f} / $5")
     print(f"Report: {output / 'report.html'}")
-    return 1 if any(s["status"] != "complete" for s in statuses.values()) else 0
+    return int(any(s["status"] != "complete" for s in statuses.values()))
 
 
 if __name__ == "__main__":

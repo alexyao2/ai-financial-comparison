@@ -1,4 +1,4 @@
-"""Dependency-light comparison artifacts, with failures separated from results."""
+"""Write the comparison CSV and HTML report."""
 import html
 import json
 import pandas as pd
@@ -8,8 +8,8 @@ def write_report(output, frames, statuses, mode):
     rows = []
     for name, frame in frames.items():
         last = frame.iloc[-1]
-        response_files = list((output / name / "decisions").glob("*.response.json"))
-        responses = [json.loads(p.read_text()) for p in response_files]
+        responses = [json.loads(p.read_text())
+                     for p in (output / name / "decisions").glob("*.response.json")]
         costs = [r["api"].get("cost_usd") for r in responses]
         rows.append({"strategy": name, "ending_value": last["portfolio_value"],
                      "contributions": last["total_contributed"], "net_gain": last["net_gain"],
@@ -37,10 +37,9 @@ def write_report(output, frames, statuses, mode):
         chart = '<svg viewBox="0 0 920 310" role="img" aria-label="Portfolio value over trading sessions">'+''.join(lines)+f'<text x="40" y="20">Portfolio value: ${lo:,.0f}–${hi:,.0f}; time runs left to right</text></svg>'
     body = summary.to_html(index=False, float_format=lambda v: f"{v:,.4f}") if rows else "No complete strategies."
     failures = html.escape(json.dumps({n:s for n,s in statuses.items() if s["status"] != "complete"}, indent=2))
-    document = f"""<!doctype html><html><head><meta charset="utf-8"><title>Investment comparison</title>
+    (output / "report.html").write_text(f"""<!doctype html><html><head><meta charset="utf-8"><title>Investment comparison</title>
     <style>body{{font:16px system-ui;max-width:1100px;margin:40px auto;padding:20px;color:#172033}}table{{border-collapse:collapse;font-size:13px}}td,th{{padding:10px;border-bottom:1px solid #ddd}}svg{{width:100%}}pre{{white-space:pre-wrap}}</style></head>
     <body><h1>Investment comparison</h1><p><strong>{html.escape(mode)}</strong></p>
     <p>Identical deposits, execution calendar, and trading fees. Returns and drawdowns are decimal fractions; time-weighted metrics remove external cash flows.</p>
     {chart}{body}<h2>Incomplete runs (not ranked)</h2><pre>{failures}</pre>
-    <p>Historical results can reflect model recall. Adjusted-close dollar positions approximate total returns, not executable share accounting. No taxes, spreads, or interest beyond configured trading costs. See manifest.json and saved decisions for provenance.</p></body></html>"""
-    (output / "report.html").write_text(document)
+    <p>Historical results can reflect model recall. Adjusted-close dollar positions approximate total returns, not executable share accounting. No taxes, spreads, or interest beyond configured trading costs. See manifest.json and saved decisions for provenance.</p></body></html>""")
