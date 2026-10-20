@@ -15,7 +15,7 @@ from model_decisions.investment import investment_config, validate_investment_co
 from prompts.decision_validation import validate_decision
 from savings_calculations.household import household, validate_finances
 from simulation.engine import Portfolio, review_period, weights_from
-from simulation.reporting import write_report
+from simulation.reporting import write_report, write_period_report
 
 ROOT = Path(__file__).resolve().parent
 
@@ -69,13 +69,17 @@ def run_strategy(name, config, store, calendar, output, registry, events, system
     weights = {"USD": 1.0}
     last_date = None
     start = pd.Timestamp(config["investment_start_date"])
-    for date in calendar:
+    for index, date in enumerate(calendar):
         frequency = config["rebalance_frequency"]
         review = last_date is None or review_period(date, frequency) != review_period(last_date, frequency)
         deposit = (config["initial_investment"] if last_date is None else 0)
         if last_date is None or (date.year, date.month) != (last_date.year, last_date.month):
             deposit += config["monthly_contribution"]
         if review:
+            period_start = len(records)
+            opening = portfolio.snapshot()
+            opening_fees = portfolio.fees
+            opening_index = portfolio.wealth_index
             cutoff = last_date if last_date is not None else start - pd.Timedelta(days=1)
             date_text = cutoff.strftime("%Y-%m-%d")
             packet = {
@@ -97,7 +101,7 @@ def run_strategy(name, config, store, calendar, output, registry, events, system
             decision = client.decide(system, packet) if client else choose_local(name, packet)
             write_json(folder / f"{date_text}.response.json", {
                 "decision": decision, "latency_seconds": time.monotonic()-began,
-                "api": client.last_metadata if client else {"provider": "offline", "cost_usd": 0}})
+                "api": client.last_metadata if client else {"provider": "offline"}})
             validate_decision(decision, expected_date=date_text)
             for allocation in decision["allocations"]:
                 ticker, category = allocation["identifier"], allocation["category"]
@@ -117,6 +121,10 @@ def run_strategy(name, config, store, calendar, output, registry, events, system
         records.append(portfolio.step(date, prices, deposit, weights,
                                       config["transaction_costs"], rebalance=review))
         last_date = date
+        if index == len(calendar) - 1 or review_period(calendar[index + 1], frequency) != review_period(date, frequency):
+            period = pd.DataFrame(records[period_start:]).set_index("Date")
+            write_period_report(output / name / "periods", period, decision, opening,
+                                opening_fees, opening_index, portfolio.snapshot())
     frame = pd.DataFrame(records).set_index("Date")
     (output / name).mkdir(parents=True, exist_ok=True)
     frame.to_csv(output / name / "portfolio.csv")
@@ -168,7 +176,6 @@ def main():
     manifest = {"mode": "live_historical" if args.live else "SYNTHETIC_DEMO_NOT_MODEL_RESULTS",
                 "configuration": config, "providers": list(clients),
                 "models": {n:c.settings["model"] for n,c in clients.items()},
-                "pricing": {n:{k:c.settings[k] for k in ("input", "output")} for n,c in clients.items()},
                 "prompt_sha256": hashlib.sha256(system.encode()).hexdigest(),
                 "event_sha256": hashlib.sha256(json.dumps(events,sort_keys=True).encode()).hexdigest(),
                 "household": household,
@@ -180,8 +187,11 @@ def main():
                 "macro_context": "user supplied release-dated events" if events else "none; trailing market returns only"}
     manifest_path = output / "manifest.json"
     comparable = json.loads(json.dumps(manifest, default=str))
-    if manifest_path.exists() and json.loads(manifest_path.read_text()) != comparable:
-        raise ValueError("Output configuration differs; choose a new --output directory.")
+    if manifest_path.exists():
+        previous = json.loads(manifest_path.read_text())
+        previous.pop("pricing", None)  # Accept pre-removal manifests when resuming.
+        if previous != comparable:
+            raise ValueError("Output configuration differs; choose a new --output directory.")
     write_json(manifest_path, manifest)
     frames, statuses = {}, {}
     names = ["cash", "balanced"] + (list(clients) if args.live else ["mock"])
@@ -204,8 +214,6 @@ def main():
         series.rename(ticker).to_csv(folder / f"{ticker}.csv", index_label="Date")
     write_json(output / "asset_registry.json", registry)
     write_report(output, frames, statuses, manifest["mode"])
-    if clients:
-        print(f"Shared API ledger committed: ${next(iter(clients.values())).budget.committed():.4f} / $5")
     print(f"Report: {output / 'report.html'}")
     return int(any(s["status"] != "complete" for s in statuses.values()))
 

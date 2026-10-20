@@ -1,8 +1,6 @@
 import json
 from io import BytesIO
-import sqlite3
 import urllib.error
-from contextlib import closing
 from pathlib import Path
 import tempfile
 import unittest
@@ -11,7 +9,7 @@ import pandas as pd
 
 from simulation.engine import Portfolio, weights_from
 from simulation.portfolio import simulate_quarter
-from model_decisions.api import Budget, APIClient
+from model_decisions.api import APIClient
 from prompts.decision_validation import validate_decision
 from run_experiment import fixed_decision, visible_events, run_strategy
 from market_data.store import PriceStore, synthetic_prices
@@ -71,6 +69,14 @@ class SimulationTests(unittest.TestCase):
             calendar=store.get('SPY').loc['2019'].index
             frame,count=run_strategy('cash',config,store,calendar,Path(folder),{'USD':'cash'},[], 'test')
             self.assertEqual(count,4)
+            reports = sorted((Path(folder)/'cash/periods').glob('*.json'))
+            self.assertEqual(len(reports), 4)
+            first, second = [json.loads(p.read_text()) for p in reports[:2]]
+            self.assertEqual(first['contributions'], 11500)
+            self.assertEqual(second['contributions'], 1500)
+            self.assertEqual(second['opening_portfolio']['portfolio_value'], 11500)
+            self.assertEqual(second['net_gain'], 0)
+            self.assertEqual(second['time_weighted_return'], 0)
             self.assertEqual(frame.iloc[-1].portfolio_value,16000)
             self.assertEqual(frame.iloc[-1].total_fees,0)
             requests=sorted((Path(folder)/'cash/decisions').glob('*.request.json'))
@@ -84,92 +90,119 @@ class SimulationTests(unittest.TestCase):
         events=[{'published_at':'2020-01-01','source':'test','description':'future'}]
         self.assertEqual(visible_events(events,pd.Timestamp('2019-12-31')),[])
 
+    def test_completed_period_survives_next_review_failure(self):
+        config = deepcopy(investment_config)
+        config.update(investment_start_date=datetime(2019, 1, 1),
+                      investment_end_date=datetime(2019, 6, 30))
+        class FailingClient:
+            last_metadata = {}
+
+            def decide(self, system, packet):
+                if packet['previous_decisions']:
+                    raise TimeoutError('second review failed')
+                return fixed_decision(packet['decision_date'], [('cash', 'USD', 100)], 'test')
+
+        with tempfile.TemporaryDirectory() as folder:
+            store = PriceStore('2019-01-01', '2019-06-30', folder, synthetic_prices())
+            calendar = store.get('SPY').loc['2019-01-01':'2019-06-30'].index
+            with self.assertRaises(TimeoutError):
+                run_strategy('test', config, store, calendar, Path(folder),
+                             {'USD': 'cash'}, [], 'test', FailingClient())
+            reports = list((Path(folder)/'test/periods').glob('*.json'))
+            self.assertEqual(len(reports), 1)
+            report = json.loads(reports[0].read_text())
+            self.assertEqual(report['end_date'], '2019-03-29')
+            self.assertEqual(report['closing_portfolio']['portfolio_value'], 11500)
+
     def test_invalid_weights_rejected(self):
         for weight in (True,float('nan'),float('inf'),101):
             d=fixed_decision('2019-01-01',[('cash','USD',weight)],'test')
             with self.assertRaises(ValueError): validate_decision(d)
 
 
-class BudgetTests(unittest.TestCase):
+class APITests(unittest.TestCase):
     def setUp(self):
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
         self.root = Path(folder.name)
-        self.budget = Budget(self.root / 'ledger.sqlite')
-        self.settings = {'provider': 'groq', 'model': 'test', 'key': 'fake-secret',
-                         'input': 1., 'output': 2.}
-        settings = patch('model_decisions.api.provider_settings', return_value=self.settings)
+        settings = patch('model_decisions.api.provider_settings', return_value={
+            'provider': 'groq', 'model': 'test', 'key': 'fake-secret'})
         settings.start()
         self.addCleanup(settings.stop)
+        sleep = patch('model_decisions.api.time.sleep')
+        self.sleep = sleep.start()
+        self.addCleanup(sleep.stop)
 
-    def client(self):
-        return APIClient('groq', self.root)
+    def response(self, content='{"ok": true}'):
+        return BytesIO(json.dumps({'choices': [{'message': {'content': content}}],
+                                 'usage': {'prompt_tokens': 100, 'completion_tokens': 50}}).encode())
 
-    def test_explicit_free_retry_preserves_failed_attempt(self):
-        b = self.budget
-        b.reserve('first', 0)
-        with self.assertRaises(RuntimeError):
-            b.reserve('first', 0)
-        retry = b.reserve('first', 0, retry_free=True)
-        self.assertNotEqual(retry, 'first')
-        b.settle(retry, 0)
-        with closing(sqlite3.connect(b.path)) as db:
-            self.assertEqual(db.execute('SELECT COUNT(*) FROM calls').fetchone()[0], 2)
-        b.reserve('paid', 1)
-        with self.assertRaises(RuntimeError):
-            b.reserve('paid', 0, retry_free=True)
-
-    def test_http_error_body_is_saved_with_key_redacted(self):
-        self.settings.update(input=0., output=0.)
-        error = urllib.error.HTTPError('https://example.test', 500, 'Internal Error', {},
-                                      BytesIO(b'backend failed fake-secret'))
-        with patch('urllib.request.urlopen', side_effect=error):
-            with self.assertRaisesRegex(RuntimeError, 'HTTP 500'):
-                self.client().decide('test', {})
-        saved = list((self.root / '.cache/errors').glob('*.json'))
-        self.assertEqual(len(saved), 1)
-        self.assertNotIn('fake-secret', saved[0].read_text())
-        self.assertEqual(json.loads(saved[0].read_text())['http_status'], 500)
-
-    def test_rate_limit_can_be_retried_without_double_reservation(self):
-        b = self.budget
-        b.reserve('one', 4)
-        b.rate_limited('one')
-        self.assertEqual(b.committed(), 0)
-        b.reserve('one', 4)
-        self.assertEqual(b.committed(), 4)
-
-    def test_shared_cap_and_uncertain_requests(self):
-        b = self.budget
-        b.reserve('one', 4)
-        with self.assertRaises(RuntimeError):
-            Budget(b.path).reserve('two', 2)
-        with self.assertRaises(RuntimeError):
-            b.reserve('one', 0)
-        b.settle('one', 1)
-        b.reserve('two', 2)
-        self.assertEqual(b.committed(), 3)
-
-    def test_api_cached_once_without_network(self):
-        decision = fixed_decision('2019-01-01', [('cash', 'USD', 100)], 'test')
-        raw = {'model': 'test', 'choices': [{'message': {'content': json.dumps(decision)}}],
-               'usage': {'prompt_tokens': 100, 'completion_tokens': 50}}
-        with patch('urllib.request.urlopen', return_value=BytesIO(json.dumps(raw).encode())) as request:
-            client = self.client()
+    def test_api_cached_once_with_usage(self):
+        with patch('urllib.request.urlopen', return_value=self.response()) as request:
+            client = APIClient('groq', self.root)
             for _ in range(2):
-                self.assertEqual(client.decide('test', {}), decision)
-                self.assertEqual(request.call_count, 1)
+                self.assertEqual(client.decide('test', {}), {'ok': True})
+            self.assertEqual(request.call_count, 1)
+            self.assertEqual(request.call_args.args[0].get_header('User-agent'),
+                             'ai-financial-comparison/1.0')
+            self.assertTrue(request.call_args.kwargs['context'].check_hostname)
             self.assertTrue(client.last_metadata['cache_hit'])
-            self.assertAlmostEqual(client.budget.committed(), .0002)
+            self.assertEqual(client.last_metadata['usage']['completion_tokens'], 50)
+            self.assertNotIn('cost_usd', client.last_metadata)
 
-    def test_failed_api_retains_reservation(self):
-        with patch('urllib.request.urlopen', side_effect=TimeoutError):
-            client = self.client()
+    def test_groq_schema_preserves_existing_cache(self):
+        with patch('urllib.request.urlopen', side_effect=[self.response(), self.response()]) as request:
+            client = APIClient('groq', self.root)
+            client.decide('test', {})
+            original = next(client.cache.glob('*.json'))
+            saved = original.read_bytes()
+            client.settings['model'] = 'openai/gpt-oss-120b'
+            client.decide('test', {})
+            body = json.loads(request.call_args.args[0].data)
+            fmt = body['response_format']
+            self.assertEqual(fmt['type'], 'json_schema')
+            self.assertTrue(fmt['json_schema']['strict'])
+            self.assertIn('risks', fmt['json_schema']['schema']['required'])
+            self.assertFalse(fmt['json_schema']['schema']['additionalProperties'])
+            self.assertEqual(original.read_bytes(), saved)
+            client.decide('test', {})
+            self.assertEqual(request.call_count, 2)
+
+    def test_temporary_error_retries_then_succeeds(self):
+        error = urllib.error.HTTPError('https://example.test', 503, 'Unavailable', {}, BytesIO(b'busy'))
+        with patch('urllib.request.urlopen', side_effect=[error, self.response()]) as request:
+            client = APIClient('groq', self.root)
+            self.assertEqual(client.decide('test', {}), {'ok': True})
+            self.assertEqual(request.call_count, 2)
+            self.assertEqual(client.last_metadata['attempts'], 2)
+            self.sleep.assert_called_once_with(5)
+        self.assertEqual(len(list((self.root / '.cache/errors').glob('*.json'))), 1)
+
+    def test_access_error_not_retried_and_key_redacted(self):
+        error = urllib.error.HTTPError('https://example.test', 403, 'Forbidden', {}, BytesIO(b'blocked fake-secret'))
+        with patch('urllib.request.urlopen', side_effect=error) as request:
+            with self.assertRaisesRegex(RuntimeError, 'HTTP 403'):
+                APIClient('groq', self.root).decide('test', {})
+            self.assertEqual(request.call_count, 1)
+            self.sleep.assert_not_called()
+        saved = next((self.root / '.cache/errors').glob('*.json')).read_text()
+        self.assertNotIn('fake-secret', saved)
+
+    def test_timeout_attempts_are_bounded_and_preserved(self):
+        with patch('urllib.request.urlopen', side_effect=TimeoutError) as request:
             with self.assertRaises(TimeoutError):
-                client.decide('test', {})
-            self.assertGreater(client.budget.committed(), 0)
-            with self.assertRaises(RuntimeError):
-                client.decide('test', {})
+                APIClient('groq', self.root).decide('test', {})
+            self.assertEqual(request.call_count, 3)
+            self.assertEqual([c.args[0] for c in self.sleep.call_args_list], [5, 10])
+        self.assertEqual(len(list((self.root / '.cache/errors').glob('*.json'))), 3)
+
+    def test_invalid_json_is_cached_not_retried(self):
+        with patch('urllib.request.urlopen', return_value=self.response('not json')) as request:
+            client = APIClient('groq', self.root)
+            for _ in range(2):
+                with self.assertRaises(ValueError): client.decide('test', {})
+            self.assertEqual(request.call_count, 1)
+            self.sleep.assert_not_called()
 
 
 if __name__ == '__main__':
