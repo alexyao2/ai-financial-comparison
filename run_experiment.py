@@ -1,5 +1,6 @@
 """Run an offline demo or live model comparison."""
 import argparse
+import shutil
 from copy import deepcopy
 from datetime import datetime
 import hashlib
@@ -141,6 +142,8 @@ def main():
     parser.add_argument("--output", type=Path, default=ROOT / "runs" / "demo")
     parser.add_argument("--fresh", action="store_true", help="Ignore cached responses")
     parser.add_argument("--frequency", choices=("monthly", "quarterly", "annually"), help="Override rebalance frequency in investment.py")
+    parser.add_argument("--overwrite", action="store_true",
+                        help="Delete the selected output run before starting")
     args = parser.parse_args()
     config = deepcopy(investment_config)
     if args.frequency:
@@ -175,6 +178,14 @@ def main():
     for ticker in ("SPY", "TLT", "AAPL"):
         store.get(ticker)
     output = args.output.resolve()
+    if args.overwrite:
+        runs_root = (ROOT / "runs").resolve()
+        if output == runs_root or runs_root not in output.parents:
+            parser.error("--overwrite requires an output folder inside runs/.")
+        if output.exists():
+            if not output.is_dir():
+                parser.error("Output exists but is not a directory.")
+            shutil.rmtree(output)
     output.mkdir(parents=True, exist_ok=True)
     system = (ROOT / "prompts/investment_prompt.md").read_text()
     manifest = {"mode": "live_historical" if args.live else "SYNTHETIC_DEMO_NOT_MODEL_RESULTS",

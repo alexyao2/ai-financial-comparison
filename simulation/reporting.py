@@ -10,7 +10,13 @@ def write_report(output, frames, statuses, mode):
         last = frame.iloc[-1]
         responses = [json.loads(p.read_text())
                      for p in (output / name / "decisions").glob("*.response.json")]
-        rows.append({"strategy": name, "ending_value": last["portfolio_value"],
+        model_names = sorted({r["api"].get("returned_model") or r["api"].get("requested_model")
+                              for r in responses if r["api"].get("requested_model")})
+        cached = sum(bool(r["api"].get("cache_hit")) for r in responses)
+        source = ("cached API" if cached == len(responses) else
+                  "mixed API/cache" if cached else "fresh API") if model_names else "local rule-based"
+        rows.append({"strategy": name, "model": ", ".join(model_names) or "No AI model",
+                     "decision_source": source, "ending_value": last["portfolio_value"],
                      "contributions": last["total_contributed"], "net_gain": last["net_gain"],
                      "trading_fees": last["total_fees"],
                      "time_weighted_return": last["time_weighted_return"],
