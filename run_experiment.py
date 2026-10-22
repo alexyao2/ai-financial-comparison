@@ -139,8 +139,12 @@ def main():
     parser.add_argument("--start", help="YYYY-MM-DD; live default uses investment.py")
     parser.add_argument("--end", help="YYYY-MM-DD, inclusive")
     parser.add_argument("--output", type=Path, default=ROOT / "runs" / "demo")
+    parser.add_argument("--fresh", action="store_true", help="Ignore cached responses")
+    parser.add_argument("--frequency", choices=("monthly", "quarterly", "annually"), help="Override rebalance frequency in investment.py")
     args = parser.parse_args()
     config = deepcopy(investment_config)
+    if args.frequency:
+        config["rebalance_frequency"] = args.frequency
     for boundary, demo_date in (("start", "2019-01-01"), ("end", "2019-12-31")):
         field = f"investment_{boundary}_date"
         default = str(config[field].date()) if args.live else demo_date
@@ -159,7 +163,7 @@ def main():
     if args.live:
         from dotenv import load_dotenv
         load_dotenv(ROOT / ".env")
-        clients = {name: APIClient(name, ROOT) for name in dict.fromkeys(args.providers)}
+        clients = {name: APIClient(name, ROOT, fresh=args.fresh) for name in dict.fromkeys(args.providers)}
     store = PriceStore(config["investment_start_date"], config["investment_end_date"], ROOT,
                        offline=None if args.live else synthetic_prices())
     calendar = store.get("SPY").loc[config["investment_start_date"]:config["investment_end_date"]].index

@@ -44,12 +44,13 @@ def provider_settings(provider):
 
 
 class APIClient:
-    def __init__(self, provider, root):
+    def __init__(self, provider, root, fresh=False):
         self.settings = provider_settings(provider)
         self.provider = provider
         self.root = Path(root)
         self.cache = self.root / ".cache" / "responses"
         self.cache.mkdir(parents=True, exist_ok=True)
+        self.fresh = fresh
         self.last_metadata = {}
         self.max_output = int(os.getenv(f"{provider.upper()}_MAX_OUTPUT_TOKENS", str(MAX_OUTPUT)))
         if self.max_output <= 0:
@@ -57,6 +58,10 @@ class APIClient:
         self.timeout = float(os.getenv("API_TIMEOUT_SECONDS", "60"))
         if not math.isfinite(self.timeout) or not 1 <= self.timeout <= 600:
             raise ValueError("API_TIMEOUT_SECONDS must be between 1 and 600")
+
+        self.retry_delay = float(os.getenv("API_RETRY_DELAY_SECONDS", "5"))
+        if not math.isfinite(self.retry_delay) or self.retry_delay <= 0:
+            raise ValueError("API_RETRY_DELAY_SECONDS must be positive")
 
     def save_error(self, attempt, details):
         folder = self.root / ".cache" / "errors"
@@ -89,7 +94,7 @@ class APIClient:
         encoded = json.dumps(body, sort_keys=True, allow_nan=False).encode()
         key = hashlib.sha256(self.provider.encode() + encoded).hexdigest()
         path = self.cache / f"{key}.json"
-        if path.exists():
+        if path.exists() and not self.fresh:
             saved = json.loads(path.read_text())
             self.last_metadata = {k: v for k, v in saved["metadata"].items()
                                   if k not in ("cost_usd", "reserved_usd")}
@@ -118,7 +123,7 @@ class APIClient:
                 error_path = self.save_error(attempt, {"error": "timeout", "timeout_seconds": self.timeout})
                 if number == MAX_ATTEMPTS - 1:
                     raise TimeoutError(f"{self.provider}: socket timeout ({self.timeout:g}s). Details: {error_path}") from None
-            delay = 5 * 2**number
+            delay = self.retry_delay * 2**number
             print(f"{self.provider}: temporary failure; retry {number + 2}/{MAX_ATTEMPTS} in {delay}s", flush=True)
             time.sleep(delay)
         usage = raw.get("usage", {})
