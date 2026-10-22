@@ -81,3 +81,4 @@ Open `report.html` inside the selected output folder. Batch runs also contain `m
 - Each strategy's `periods/`: reports for individual review periods.
 
 This project makes no live trades, this is only intended for simulation and demonstration, testing models against each other. 
+Expect the live run executions to take time: endpoint connectivity can have delays.
